@@ -1,5 +1,8 @@
+import 'dart:async';
+import 'dart:math';
+
 import 'package:flutter/material.dart';
-import 'package:web/web.dart' as web;
+import 'browser_services.dart' as browser;
 
 void main() => runApp(const MirrorGame());
 
@@ -24,14 +27,22 @@ class MirrorGame extends StatelessWidget {
   }
 }
 
+/// Visual theme of the era map.
+enum EraScene { medieval, sea, modern }
+
 class Era {
   const Era({required this.name, required this.years, required this.icon,
-    required this.color, required this.questions});
+    required this.color, required this.scene, required this.markerIcons, required this.questions});
   final String name;
   final String years;
   final IconData icon;
   final Color color;
+  final EraScene scene;
+  /// Map marker icon for each question (same order as [questions]).
+  final List<IconData> markerIcons;
   final List<HistoryQuestion> questions;
+
+  String get storageKey => 'mirror_of_time.stars.$name';
 }
 
 class HistoryQuestion {
@@ -44,19 +55,23 @@ class HistoryQuestion {
 
 const eras = <Era>[
   Era(name: 'Средневековье', years: 'V — XV века', icon: Icons.castle_outlined,
-    color: Color(0xffbd8150), questions: [
+    color: Color(0xffbd8150), scene: EraScene.medieval,
+    markerIcons: [Icons.shield_outlined, Icons.handyman_outlined, Icons.church_outlined],
+    questions: [
       HistoryQuestion('Как называли воина в тяжёлых доспехах, служившего феодалу?',
         ['Рыцарь', 'Гладиатор', 'Легионер'], 0,
         'Рыцари служили сеньору и проходили долгую военную подготовку.'),
-      HistoryQuestion('Как назывался центр средневекового города с рынком и ратушей?',
-        ['Форум', 'Площадь', 'Акрополь'], 1,
-        'Городская площадь была центром торговли и общественной жизни.'),
-      HistoryQuestion('Какой материал помог европейцам строить высокие соборы?',
-        ['Железобетон', 'Стеклопластик', 'Камень'], 2,
-        'Каменные соборы строили десятилетиями, иногда целыми поколениями.'),
+      HistoryQuestion('Как назывались объединения ремесленников одной профессии в средневековых городах?',
+        ['Сенаты', 'Цехи', 'Трибы'], 1,
+        'Цехи следили за качеством товаров, обучали учеников и защищали своих мастеров.'),
+      HistoryQuestion('Как называется стиль соборов с острыми арками, высокими шпилями и витражами?',
+        ['Романский', 'Барокко', 'Готика'], 2,
+        'Готические соборы, например Нотр-Дам в Париже, строили десятилетиями, иногда целыми поколениями.'),
     ]),
   Era(name: 'Эпоха великих открытий', years: 'XV — XVII века', icon: Icons.sailing,
-    color: Color(0xff61969b), questions: [
+    color: Color(0xff61969b), scene: EraScene.sea,
+    markerIcons: [Icons.flag_outlined, Icons.explore_outlined, Icons.sailing],
+    questions: [
       HistoryQuestion('Кто в 1492 году достиг островов Карибского моря, плывя на запад?',
         ['Васко да Гама', 'Христофор Колумб', 'Фернан Магеллан'], 1,
         'Экспедиция Колумба достигла Карибских островов в 1492 году.'),
@@ -68,18 +83,27 @@ const eras = <Era>[
         '«Виктория» вернулась в Испанию в 1522 году, завершив первое кругосветное плавание.'),
     ]),
   Era(name: 'Новейшее время', years: 'XX — XXI века', icon: Icons.rocket_launch_outlined,
-    color: Color(0xff8c83bd), questions: [
+    color: Color(0xff8c83bd), scene: EraScene.modern,
+    markerIcons: [Icons.rocket_launch_outlined, Icons.satellite_alt_outlined, Icons.language],
+    questions: [
       HistoryQuestion('В каком году Юрий Гагарин совершил первый полёт человека в космос?',
         ['1957', '1961', '1969'], 1,
         'Полёт Юрия Гагарина на корабле «Восток-1» состоялся 12 апреля 1961 года.'),
-      HistoryQuestion('Какое изобретение позволило мгновенно передавать сообщения на большие расстояния?',
-        ['Телеграф', 'Печатный станок', 'Паровой двигатель'], 0,
-        'Электрический телеграф стал важным шагом к современной связи.'),
+      HistoryQuestion('Как назывался первый искусственный спутник Земли, запущенный в 1957 году?',
+        ['«Спутник-1»', '«Восток-1»', '«Аполлон-11»'], 0,
+        '4 октября 1957 года СССР вывел на орбиту «Спутник-1» — так началась космическая эра.'),
       HistoryQuestion('Как называется всемирная компьютерная сеть, ставшая доступной широкой публике в 1990-х?',
         ['Интернет', 'Трансатлантический кабель', 'Радио'], 0,
         'В 1990-х интернет быстро вошёл в повседневную жизнь людей.'),
     ]),
 ];
+
+/// Number of cracks after which the mirror breaks and the era is failed.
+const maxCracks = 3;
+const _mapPoints = [Offset(.30, .58), Offset(.51, .39), Offset(.72, .58)];
+const _startPosition = Offset(.14, .55);
+
+enum Stage { home, map, question, result }
 
 class GamePage extends StatefulWidget {
   const GamePage({super.key});
@@ -88,103 +112,166 @@ class GamePage extends StatefulWidget {
 }
 
 class _GamePageState extends State<GamePage> {
+  final _random = Random();
+  Stage stage = Stage.home;
   Era? selectedEra;
   int questionIndex = 0;
+  /// Questions answered correctly on the first try.
   int score = 0;
+  int cracks = 0;
+  /// Original (unshuffled) index of the chosen option.
   int? selectedAnswer;
   bool answered = false;
-  bool finished = false;
-  bool exploring = false;
-  Offset playerPosition = const Offset(.14, .55);
+  bool missedCurrent = false;
+  List<int> optionOrder = const [];
+  Offset playerPosition = _startPosition;
   bool traveling = false;
   final Set<int> completedQuestions = <int>{};
   int speechKey = 0;
   bool voiceEnabled = true;
+  final Map<String, int> bestStars = <String, int>{};
+  int earnedStars = 0;
+  bool newRecord = false;
 
-  void speakQuestion() {
-    if (!voiceEnabled || selectedEra == null) return;
-    final question = selectedEra!.questions[questionIndex].text;
-    try {
-      web.window.speechSynthesis.cancel();
-      final utterance = web.SpeechSynthesisUtterance(question)..lang = 'ru-RU'..rate = .91;
-      web.window.speechSynthesis.speak(utterance);
-    } catch (_) {
-      // Some browsers do not expose speech synthesis.
+  bool get failed => cracks >= maxCracks;
+  HistoryQuestion get currentQuestion => selectedEra!.questions[questionIndex];
+  int get totalStars => bestStars.values.fold(0, (sum, s) => sum + s);
+
+  @override
+  void initState() {
+    super.initState();
+    _loadStars();
+  }
+
+  @override
+  void dispose() {
+    stopSpeech();
+    super.dispose();
+  }
+
+  void _loadStars() {
+    for (final era in eras) {
+      final value = int.tryParse(browser.readStorage(era.storageKey) ?? '');
+      if (value != null) bestStars[era.name] = value.clamp(0, maxCracks);
     }
   }
 
-  void startEra(Era era) => setState(() {
-    selectedEra = era;
-    questionIndex = 0;
-    score = 0;
-    selectedAnswer = null;
-    answered = false;
-    finished = false;
-    exploring = true;
-    playerPosition = const Offset(.14, .55);
-    traveling = false;
-    completedQuestions.clear();
-    speechKey++;
-  });
+  void _saveStars(Era era, int stars) {
+    bestStars[era.name] = stars;
+    browser.writeStorage(era.storageKey, '$stars');
+  }
 
-  void chooseAnswer(int index) {
-    if (answered) return;
+  void stopSpeech() => browser.stopSpeech();
+
+  void speakQuestion() {
+    if (!voiceEnabled || selectedEra == null || stage != Stage.question) return;
+    browser.speak(currentQuestion.text);
+  }
+
+  void toggleVoice() {
+    if (voiceEnabled) stopSpeech();
+    setState(() => voiceEnabled = !voiceEnabled);
+  }
+
+  List<int> _shuffledOptions() =>
+    List<int>.generate(currentQuestion.options.length, (i) => i)..shuffle(_random);
+
+  void startEra(Era era) {
+    stopSpeech();
     setState(() {
-      selectedAnswer = index;
-      answered = true;
-      if (index == selectedEra!.questions[questionIndex].answer && completedQuestions.add(questionIndex)) score++;
+      selectedEra = era;
+      stage = Stage.map;
+      questionIndex = 0;
+      score = 0;
+      cracks = 0;
+      selectedAnswer = null;
+      answered = false;
+      missedCurrent = false;
+      playerPosition = _startPosition;
+      traveling = false;
+      completedQuestions.clear();
+      earnedStars = 0;
+      newRecord = false;
     });
   }
 
-  void nextQuestion() => setState(() {
-    if (selectedAnswer != selectedEra!.questions[questionIndex].answer) {
-      selectedAnswer = null;
-      answered = false;
-      speechKey++;
+  void chooseAnswer(int option) {
+    if (answered) return;
+    stopSpeech();
+    setState(() {
+      selectedAnswer = option;
+      answered = true;
+      if (option == currentQuestion.answer) {
+        if (completedQuestions.add(questionIndex) && !missedCurrent) score++;
+      } else {
+        missedCurrent = true;
+        cracks++;
+      }
+    });
+  }
+
+  void nextQuestion() {
+    stopSpeech();
+    if (failed) return _finish();
+    if (selectedAnswer != currentQuestion.answer) {
+      setState(() {
+        selectedAnswer = null;
+        answered = false;
+        optionOrder = _shuffledOptions();
+        speechKey++;
+      });
       WidgetsBinding.instance.addPostFrameCallback((_) => speakQuestion());
       return;
     }
-    if (completedQuestions.length == selectedEra!.questions.length) {
-      finished = true;
-    } else {
+    if (completedQuestions.length == selectedEra!.questions.length) return _finish();
+    setState(() {
       selectedAnswer = null;
       answered = false;
-      exploring = true;
-      playerPosition = const Offset(.14, .55);
-      traveling = false;
-      speechKey++;
-    }
-  });
+      stage = Stage.map;
+    });
+  }
+
+  void _finish() {
+    final era = selectedEra!;
+    setState(() {
+      earnedStars = failed ? 0 : maxCracks - cracks;
+      newRecord = earnedStars > (bestStars[era.name] ?? 0);
+      if (newRecord) _saveStars(era, earnedStars);
+      stage = Stage.result;
+    });
+  }
 
   Future<void> travelToQuestion(int index) async {
-    if (traveling) return;
-    final destinations = [
-      const Offset(.30, .58),
-      const Offset(.51, .39),
-      const Offset(.72, .58),
-    ];
+    if (traveling || completedQuestions.contains(index)) return;
     setState(() {
       questionIndex = index;
       selectedAnswer = null;
       answered = false;
+      missedCurrent = false;
+      optionOrder = _shuffledOptions();
       traveling = true;
-      playerPosition = destinations[index];
+      playerPosition = _mapPoints[index];
     });
     await Future<void>.delayed(const Duration(milliseconds: 750));
-    if (!mounted) return;
+    if (!mounted || selectedEra == null) return;
     setState(() {
       traveling = false;
-      exploring = false;
+      stage = Stage.question;
+      speechKey++;
     });
     WidgetsBinding.instance.addPostFrameCallback((_) => speakQuestion());
   }
 
-  void goHome() => setState(() {
-    selectedEra = null;
-    finished = false;
-    selectedAnswer = null;
-    answered = false;
-  });
+  void goHome() {
+    stopSpeech();
+    setState(() {
+      stage = Stage.home;
+      selectedEra = null;
+      selectedAnswer = null;
+      answered = false;
+      traveling = false;
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -202,8 +289,12 @@ class _GamePageState extends State<GamePage> {
               constraints: const BoxConstraints(maxWidth: 1060),
               child: Padding(
                 padding: EdgeInsets.symmetric(horizontal: compact ? 20 : 52, vertical: 24),
-                child: selectedEra == null ? _buildHome(compact) :
-                  (finished ? _buildResult(compact) : (exploring ? _buildWorld(compact) : _buildQuestion(compact))),
+                child: switch (stage) {
+                  Stage.home => _buildHome(compact),
+                  Stage.map => _buildWorld(compact),
+                  Stage.question => _buildQuestion(compact),
+                  Stage.result => _buildResult(compact),
+                },
               ),
             ),
           ),
@@ -212,92 +303,116 @@ class _GamePageState extends State<GamePage> {
     );
   }
 
-  Widget _buildHome(bool compact) => Column(
-    mainAxisAlignment: MainAxisAlignment.center,
-    children: [
-      const _Brand(),
-      const SizedBox(height: 34),
-      _MirrorCard(mood: 'curious', compact: compact,
-        title: 'ЗЕРКАЛО ВРЕМЕНИ', subtitle: 'Три эпохи. Девять загадок.\nПроверь, что помнит история.'),
-      const SizedBox(height: 30),
-      Text('ВЫБЕРИ ЭПОХУ', style: _eyebrow),
-      const SizedBox(height: 14),
-      Wrap(spacing: 12, runSpacing: 12, alignment: WrapAlignment.center,
-        children: eras.map((era) => _EraButton(era: era, onTap: () => startEra(era))).toList()),
-      const SizedBox(height: 18),
-      const Text('Ответь на три вопроса и узнай, доволен ли тобой хранитель времени.',
-        textAlign: TextAlign.center, style: TextStyle(color: Color(0xffa4adae), fontSize: 13)),
-    ],
-  );
+  Widget _buildTopBar() => Row(children: [
+    _IconButton(icon: Icons.arrow_back, onTap: goHome),
+    const Spacer(),
+    const _Brand(),
+    const Spacer(),
+    _CracksIndicator(cracks: cracks),
+    const SizedBox(width: 10),
+    IconButton.filledTonal(
+      tooltip: voiceEnabled ? 'Выключить озвучку' : 'Включить озвучку',
+      onPressed: toggleVoice,
+      icon: Icon(voiceEnabled ? Icons.volume_up_rounded : Icons.volume_off_rounded),
+    ),
+  ]);
+
+  Widget _buildHome(bool compact) => Center(child: SingleChildScrollView(
+    child: Column(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        const _Brand(),
+        const SizedBox(height: 34),
+        _MirrorCard(mood: 'curious', compact: compact,
+          title: 'ЗЕРКАЛО ВРЕМЕНИ', subtitle: 'Три эпохи. Девять загадок.\nПроверь, что помнит история.'),
+        const SizedBox(height: 30),
+        Text('ВЫБЕРИ ЭПОХУ', style: _eyebrow),
+        const SizedBox(height: 14),
+        Wrap(spacing: 12, runSpacing: 12, alignment: WrapAlignment.center,
+          children: eras.map((era) => _EraButton(era: era, stars: bestStars[era.name] ?? 0,
+            onTap: () => startEra(era))).toList()),
+        const SizedBox(height: 18),
+        Row(mainAxisSize: MainAxisSize.min, children: [
+          const Icon(Icons.star_rounded, size: 18, color: Color(0xffe2b47b)),
+          const SizedBox(width: 5),
+          Text('$totalStars / ${eras.length * maxCracks} звёзд собрано',
+            style: const TextStyle(color: Color(0xffd4c3aa), fontSize: 13, fontWeight: FontWeight.w600)),
+        ]),
+        const SizedBox(height: 10),
+        const Text('Каждая ошибка оставляет трещину на зеркале и отнимает звезду.\nТри трещины — и зеркало разобьётся.',
+          textAlign: TextAlign.center, style: TextStyle(color: Color(0xffa4adae), fontSize: 13, height: 1.4)),
+      ],
+    ),
+  ));
 
   Widget _buildQuestion(bool compact) {
     final era = selectedEra!;
-    final question = era.questions[questionIndex];
-    return Column(
-      children: [
-        Row(children: [
-          _IconButton(icon: Icons.arrow_back, onTap: goHome),
-          const Spacer(),
-          const _Brand(),
-          const Spacer(),
-          IconButton.filledTonal(
-            tooltip: voiceEnabled ? 'Выключить озвучку' : 'Включить озвучку',
-            onPressed: () => setState(() => voiceEnabled = !voiceEnabled),
-            icon: Icon(voiceEnabled ? Icons.volume_up_rounded : Icons.volume_off_rounded),
-          ),
-          Text('${questionIndex + 1} / ${era.questions.length}', style: _eyebrow),
-        ]),
-        SizedBox(height: compact ? 20 : 34),
-        _MirrorCard(mood: answered ? (selectedAnswer == question.answer ? 'happy' : 'angry') : 'speaking',
-          compact: compact,
-          title: answered
-            ? (selectedAnswer == question.answer ? 'МУДРО!' : 'ХМ…')
-            : 'СЛУШАЙ ВРЕМЯ',
-          subtitle: answered
-            ? (selectedAnswer == question.answer ? 'Зеркало довольно\nтвоим ответом.' : 'Зеркало нахмурилось,\nно историю не обманешь.')
-            : 'Зеркало задаёт\nвопрос из эпохи:'),
-        const SizedBox(height: 18),
-        _ProgressBar(value: (questionIndex + (answered ? 1 : 0)) / era.questions.length, color: era.color),
-        const SizedBox(height: 18),
-        Text('${era.name.toUpperCase()}  ·  ${era.years}', style: TextStyle(fontSize: 11, letterSpacing: 2.2, color: era.color, fontWeight: FontWeight.w600)),
-        const SizedBox(height: 10),
-        _SpeakingQuestion(key: ValueKey(speechKey), text: question.text,
-          compact: compact, onFinished: () {}),
-        const SizedBox(height: 18),
-        ...List.generate(question.options.length, (index) => Padding(
-          padding: const EdgeInsets.only(bottom: 9),
-          child: _AnswerButton(label: question.options[index], index: index,
-            correct: question.answer == index, selected: selectedAnswer == index,
-          answered: answered, onTap: () => chooseAnswer(index)),
-        )),
-        if (answered) ...[
-          const SizedBox(height: 4),
-          Text(question.fact, textAlign: TextAlign.center,
-            style: const TextStyle(color: Color(0xffc1c6c2), height: 1.4, fontSize: 13)),
-          const SizedBox(height: 14),
-          _PrimaryButton(label: selectedAnswer == question.answer
-              ? (questionIndex + 1 == era.questions.length ? 'ЗАВЕРШИТЬ ПУТЕШЕСТВИЕ' : 'ОТКРЫТЬ СЛЕДУЮЩИЙ ПУТЬ')
-              : 'ПОПРОБОВАТЬ ЕЩЁ РАЗ',
-            onTap: nextQuestion),
+    final question = currentQuestion;
+    final correct = answered && selectedAnswer == question.answer;
+    final reveal = answered && (correct || failed);
+    final String title;
+    final String subtitle;
+    if (!answered) {
+      title = 'СЛУШАЙ ВРЕМЯ';
+      subtitle = 'Зеркало задаёт\nвопрос из эпохи:';
+    } else if (correct) {
+      title = 'МУДРО!';
+      subtitle = missedCurrent ? 'Верно, хоть и не с первого раза.' : 'Зеркало довольно\nтвоим ответом.';
+    } else if (failed) {
+      title = 'ЗЕРКАЛО РАЗБИЛОСЬ';
+      subtitle = 'Третья трещина…\nВремя ускользнуло.';
+    } else {
+      final left = maxCracks - cracks;
+      title = 'ХМ… ТРЕЩИНА!';
+      subtitle = 'Ошибка оставила след.\n${left == 1 ? 'Осталась последняя попытка' : 'Ещё можно ошибиться: ${left - 1}'}.';
+    }
+    return SingleChildScrollView(
+      child: Column(
+        children: [
+          _buildTopBar(),
+          SizedBox(height: compact ? 20 : 34),
+          _MirrorCard(mood: answered ? (correct ? 'happy' : 'angry') : 'speaking',
+            compact: compact, cracks: cracks, title: title, subtitle: subtitle),
+          const SizedBox(height: 18),
+          _ProgressBar(value: completedQuestions.length / era.questions.length, color: era.color),
+          const SizedBox(height: 18),
+          Text('${era.name.toUpperCase()}  ·  ${era.years}', style: TextStyle(fontSize: 11, letterSpacing: 2.2, color: era.color, fontWeight: FontWeight.w600)),
+          const SizedBox(height: 10),
+          _SpeakingQuestion(key: ValueKey(speechKey), text: question.text,
+            compact: compact, onFinished: () {}),
+          const SizedBox(height: 18),
+          ...List.generate(optionOrder.length, (position) {
+            final option = optionOrder[position];
+            return Padding(
+              padding: const EdgeInsets.only(bottom: 9),
+              child: _AnswerButton(label: question.options[option], index: position,
+                correct: reveal && question.answer == option, selected: selectedAnswer == option,
+                answered: answered, onTap: () => chooseAnswer(option)),
+            );
+          }),
+          if (answered) ...[
+            const SizedBox(height: 4),
+            if (reveal) ...[
+              Text(question.fact, textAlign: TextAlign.center,
+                style: const TextStyle(color: Color(0xffc1c6c2), height: 1.4, fontSize: 13)),
+              const SizedBox(height: 14),
+            ],
+            _PrimaryButton(label: failed
+                ? 'К ИТОГАМ'
+                : correct
+                  ? (completedQuestions.length == era.questions.length ? 'ЗАВЕРШИТЬ ПУТЕШЕСТВИЕ' : 'ОТКРЫТЬ СЛЕДУЮЩИЙ ПУТЬ')
+                  : 'ПОПРОБОВАТЬ ЕЩЁ РАЗ',
+              onTap: nextQuestion),
+          ],
         ],
-      ],
+      ),
     );
   }
 
   Widget _buildWorld(bool compact) {
     final era = selectedEra!;
     return Column(children: [
-      Row(children: [
-        _IconButton(icon: Icons.arrow_back, onTap: goHome),
-        const Spacer(),
-        const _Brand(),
-        const Spacer(),
-        IconButton.filledTonal(
-          tooltip: voiceEnabled ? 'Выключить озвучку' : 'Включить озвучку',
-          onPressed: () => setState(() => voiceEnabled = !voiceEnabled),
-          icon: Icon(voiceEnabled ? Icons.volume_up_rounded : Icons.volume_off_rounded),
-        ),
-      ]),
+      _buildTopBar(),
       const SizedBox(height: 12),
       Text('${era.name.toUpperCase()}  ·  ${era.years}', style: TextStyle(fontSize: 11, letterSpacing: 2.2, color: era.color, fontWeight: FontWeight.w600)),
       const SizedBox(height: 8),
@@ -310,7 +425,7 @@ class _GamePageState extends State<GamePage> {
           final w = bounds.maxWidth;
           final h = bounds.maxHeight;
           return Stack(fit: StackFit.expand, children: [
-            CustomPaint(painter: _WorldPainter(color: era.color)),
+            CustomPaint(painter: _WorldPainter(color: era.color, scene: era.scene)),
             Positioned(left: w * .77, top: h * .18, width: w * .13, height: h * .39,
               child: _WorldMirror(glowing: true, color: era.color)),
             AnimatedPositioned(duration: const Duration(milliseconds: 700), curve: Curves.easeInOutCubic,
@@ -318,12 +433,11 @@ class _GamePageState extends State<GamePage> {
               child: _WorldHero(color: era.color)),
             Positioned(left: 14, top: 14, child: _MapBadge(icon: Icons.person, text: 'ПУТЕШЕСТВЕННИК')),
             ...List.generate(era.questions.length, (index) {
-              const points = [Offset(.30, .58), Offset(.51, .39), Offset(.72, .58)];
-              const icons = [Icons.castle_outlined, Icons.menu_book_rounded, Icons.auto_awesome];
-              final point = points[index];
+              final point = _mapPoints[index];
+              final complete = completedQuestions.contains(index);
               return Positioned(left: w * point.dx - 23, top: h * point.dy - 23,
-                child: _QuestionMarker(index: index, complete: completedQuestions.contains(index),
-                  color: era.color, icon: icons[index], disabled: traveling,
+                child: _QuestionMarker(index: index, complete: complete,
+                  color: era.color, icon: era.markerIcons[index], disabled: traveling || complete,
                   onTap: () => travelToQuestion(index)));
             }),
             if (traveling) Positioned(left: 0, right: 0, bottom: 20,
@@ -332,9 +446,12 @@ class _GamePageState extends State<GamePage> {
         }))),
       const SizedBox(height: 12),
       Wrap(spacing: 10, runSpacing: 8, alignment: WrapAlignment.center,
-        children: List.generate(era.questions.length, (index) => _MapQuestionChip(
-          index: index, complete: completedQuestions.contains(index), color: era.color,
-          onTap: traveling ? null : () => travelToQuestion(index))),
+        children: List.generate(era.questions.length, (index) {
+          final complete = completedQuestions.contains(index);
+          return _MapQuestionChip(
+            index: index, complete: complete, color: era.color,
+            onTap: traveling || complete ? null : () => travelToQuestion(index));
+        }),
       ),
       const SizedBox(height: 8),
       Text('${completedQuestions.length} из ${era.questions.length} вопросов открыто',
@@ -343,27 +460,46 @@ class _GamePageState extends State<GamePage> {
   }
 
   Widget _buildResult(bool compact) {
-    final ratio = score / selectedEra!.questions.length;
-    final mood = ratio >= .67 ? 'happy' : (ratio == 0 ? 'angry' : 'curious');
-    final headline = ratio == 1 ? 'ИСТИННЫЙ ЗНАТОК!' : (ratio >= .67 ? 'ОТЛИЧНЫЙ ПУТЬ!' : 'ПУТЕШЕСТВИЕ ПРОДОЛЖАЕТСЯ');
-    final message = ratio == 1 ? 'Зеркало сияет: ты прекрасно знаешь эту эпоху.' :
-      (ratio >= .67 ? 'Хранитель времени доволен. Ещё немного — и все тайны раскрыты.' :
-      'Зеркало советует заглянуть в учебник и попробовать ещё раз.');
-    return Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-      Row(children: [_IconButton(icon: Icons.arrow_back, onTap: goHome), const Spacer(), const _Brand(), const Spacer(), const SizedBox(width: 44)]),
-      const SizedBox(height: 26),
-      _MirrorCard(mood: mood, compact: compact, title: headline, subtitle: message),
-      const SizedBox(height: 20),
-      Text('$score из ${selectedEra!.questions.length}', style: const TextStyle(fontSize: 34, fontWeight: FontWeight.bold, color: Color(0xffe2b47b))),
-      const SizedBox(height: 5),
-      Text('правильных ответов · ${selectedEra!.name}', style: const TextStyle(color: Color(0xffa4adae))),
-      const SizedBox(height: 22),
-      _PrimaryButton(label: 'ВЫБРАТЬ ДРУГУЮ ЭПОХУ', onTap: goHome),
-      const SizedBox(height: 10),
-      TextButton(onPressed: () => startEra(selectedEra!), child: const Text('ПРОЙТИ ЕЩЁ РАЗ')),
-    ]);
+    final era = selectedEra!;
+    final total = era.questions.length;
+    final mood = failed ? 'angry' : (earnedStars >= 2 ? 'happy' : 'curious');
+    final headline = failed ? 'ЗЕРКАЛО РАЗБИЛОСЬ' :
+      (earnedStars == 3 ? 'ИСТИННЫЙ ЗНАТОК!' : (earnedStars == 2 ? 'ОТЛИЧНЫЙ ПУТЬ!' : 'ПУТЬ ПРОЙДЕН'));
+    final message = failed ? 'Три трещины — и время ускользнуло.\nИстория любит упорных: попробуй снова.' :
+      (earnedStars == 3 ? 'Ни одной трещины! Зеркало сияет: ты прекрасно знаешь эту эпоху.' :
+      (earnedStars == 2 ? 'Хранитель времени доволен. Пройди без ошибок, чтобы получить все звёзды.' :
+      'Зеркало уцелело, но трещин многовато. Попробуй собрать больше звёзд.'));
+    return Center(child: SingleChildScrollView(
+      child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+        Row(children: [_IconButton(icon: Icons.arrow_back, onTap: goHome), const Spacer(), const _Brand(), const Spacer(), const SizedBox(width: 44)]),
+        const SizedBox(height: 26),
+        _MirrorCard(mood: mood, compact: compact, cracks: cracks, title: headline, subtitle: message),
+        const SizedBox(height: 22),
+        _StarsRow(stars: earnedStars, size: 46),
+        if (newRecord) ...[
+          const SizedBox(height: 6),
+          const Text('НОВЫЙ РЕКОРД!', style: TextStyle(fontSize: 12, letterSpacing: 2, color: Color(0xffe2b47b), fontWeight: FontWeight.bold)),
+        ],
+        const SizedBox(height: 14),
+        Text('$score из $total', style: const TextStyle(fontSize: 34, fontWeight: FontWeight.bold, color: Color(0xffe2b47b))),
+        const SizedBox(height: 5),
+        Text('с первой попытки · трещин: $cracks · ${era.name}', textAlign: TextAlign.center,
+          style: const TextStyle(color: Color(0xffa4adae))),
+        const SizedBox(height: 22),
+        if (failed) ...[
+          _PrimaryButton(label: 'ПОПРОБОВАТЬ СНОВА', onTap: () => startEra(era)),
+          const SizedBox(height: 10),
+          TextButton(onPressed: goHome, child: const Text('ВЫБРАТЬ ДРУГУЮ ЭПОХУ')),
+        ] else ...[
+          _PrimaryButton(label: 'ВЫБРАТЬ ДРУГУЮ ЭПОХУ', onTap: goHome),
+          const SizedBox(height: 10),
+          TextButton(onPressed: () => startEra(era), child: const Text('ПРОЙТИ ЕЩЁ РАЗ')),
+        ],
+      ]),
+    ));
   }
 }
+
 
 const _eyebrow = TextStyle(fontSize: 11, letterSpacing: 2.2, color: Color(0xffa4adae), fontWeight: FontWeight.w600);
 
@@ -377,15 +513,20 @@ class _Brand extends StatelessWidget {
 }
 
 class _WorldPainter extends CustomPainter {
-  const _WorldPainter({required this.color});
+  const _WorldPainter({required this.color, required this.scene});
   final Color color;
+  final EraScene scene;
 
   @override
   void paint(Canvas canvas, Size size) {
     final bounds = Offset.zero & size;
-    final background = Paint()..shader = const LinearGradient(
+    final background = Paint()..shader = LinearGradient(
       begin: Alignment.topLeft, end: Alignment.bottomRight,
-      colors: [Color(0xff29413d), Color(0xff1b302e), Color(0xff263936)],
+      colors: switch (scene) {
+        EraScene.medieval => const [Color(0xff29413d), Color(0xff1b302e), Color(0xff263936)],
+        EraScene.sea => const [Color(0xff2c4140), Color(0xff22382f), Color(0xff2b3d36)],
+        EraScene.modern => const [Color(0xff2a2c3f), Color(0xff1f2233), Color(0xff292b3d)],
+      },
     ).createShader(bounds);
     canvas.drawRect(bounds, background);
 
@@ -412,18 +553,22 @@ class _WorldPainter extends CustomPainter {
       canvas.drawOval(Rect.fromCenter(center: Offset(x, y), width: 18, height: 8), stonePaint);
     }
 
-    final bush = Paint()..color = const Color(0xff142722).withValues(alpha: .78);
-    final bushHighlight = Paint()..color = const Color(0xff54765c).withValues(alpha: .36);
-    final clusters = <Offset>[
-      Offset(size.width * .12, size.height * .23), Offset(size.width * .27, size.height * .24),
-      Offset(size.width * .43, size.height * .19), Offset(size.width * .57, size.height * .22),
-      Offset(size.width * .90, size.height * .21), Offset(size.width * .91, size.height * .72),
-      Offset(size.width * .37, size.height * .83), Offset(size.width * .14, size.height * .83),
-    ];
-    for (final p in clusters) {
-      canvas.drawCircle(p, 18, bush);
-      canvas.drawCircle(p.translate(-5, -4), 8, bushHighlight);
-      canvas.drawCircle(p.translate(8, -1), 9, bushHighlight);
+    switch (scene) {
+      case EraScene.medieval:
+        _paintCastle(canvas, size);
+        _paintBushes(canvas, size, [
+          Offset(size.width * .43, size.height * .19), Offset(size.width * .57, size.height * .22),
+          Offset(size.width * .90, size.height * .21), Offset(size.width * .91, size.height * .72),
+          Offset(size.width * .37, size.height * .83), Offset(size.width * .14, size.height * .83),
+        ]);
+      case EraScene.sea:
+        _paintSea(canvas, size);
+        _paintBushes(canvas, size, [
+          Offset(size.width * .91, size.height * .72), Offset(size.width * .37, size.height * .86),
+          Offset(size.width * .14, size.height * .84),
+        ]);
+      case EraScene.modern:
+        _paintCity(canvas, size);
     }
 
     final sparkle = Paint()..color = color.withValues(alpha: .55);
@@ -437,8 +582,134 @@ class _WorldPainter extends CustomPainter {
     canvas.drawRect(bounds, vignette);
   }
 
+  void _paintBushes(Canvas canvas, Size size, List<Offset> clusters) {
+    final bush = Paint()..color = const Color(0xff142722).withValues(alpha: .78);
+    final bushHighlight = Paint()..color = const Color(0xff54765c).withValues(alpha: .36);
+    for (final p in clusters) {
+      canvas.drawCircle(p, 18, bush);
+      canvas.drawCircle(p.translate(-5, -4), 8, bushHighlight);
+      canvas.drawCircle(p.translate(8, -1), 9, bushHighlight);
+    }
+  }
+
+  void _paintCastle(Canvas canvas, Size size) {
+    final wall = Paint()..color = const Color(0xff13211f).withValues(alpha: .85);
+    final light = Paint()..color = color.withValues(alpha: .55);
+    final left = size.width * .08;
+    final base = size.height * .33;
+    final w = size.width * .26;
+    final h = size.height * .12;
+    canvas.drawRect(Rect.fromLTRB(left, base - h, left + w, base), wall);
+    // Battlements.
+    for (var i = 0; i < 7; i++) {
+      final x = left + w * i / 6.5;
+      canvas.drawRect(Rect.fromLTWH(x, base - h - 7, w / 16, 7), wall);
+    }
+    // Towers with conical roofs.
+    for (final t in [0.0, .5, 1.0]) {
+      final cx = left + w * t;
+      final tw = size.width * .045;
+      final th = h * (t == .5 ? 1.9 : 1.5);
+      canvas.drawRect(Rect.fromLTRB(cx - tw / 2, base - th, cx + tw / 2, base), wall);
+      canvas.drawPath(Path()
+        ..moveTo(cx - tw * .7, base - th)
+        ..lineTo(cx, base - th - tw * 1.3)
+        ..lineTo(cx + tw * .7, base - th)
+        ..close(), wall);
+      canvas.drawRRect(RRect.fromRectAndRadius(
+        Rect.fromCenter(center: Offset(cx, base - th * .65), width: 4, height: 8), const Radius.circular(2)), light);
+    }
+    // Gate.
+    canvas.drawRRect(RRect.fromRectAndCorners(
+      Rect.fromCenter(center: Offset(left + w * .5, base - h * .3), width: w * .12, height: h * .6),
+      topLeft: const Radius.circular(20), topRight: const Radius.circular(20)), light..color = color.withValues(alpha: .3));
+  }
+
+  void _paintSea(Canvas canvas, Size size) {
+    final waterRect = Rect.fromLTRB(0, 0, size.width, size.height * .34);
+    final water = Paint()..shader = const LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter,
+      colors: [Color(0xff16323c), Color(0xff1f4650)]).createShader(waterRect);
+    final shore = Path()
+      ..moveTo(0, 0)..lineTo(size.width, 0)..lineTo(size.width, size.height * .28);
+    for (var i = 10; i >= 0; i--) {
+      final x = size.width * i / 10;
+      shore.lineTo(x, size.height * (.31 + .03 * sin(i * 1.7)));
+    }
+    shore.close();
+    canvas.drawPath(shore, water);
+    final wave = Paint()
+      ..color = const Color(0xff9fd0d0).withValues(alpha: .22)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.6
+      ..strokeCap = StrokeCap.round;
+    for (final row in [.08, .16, .24]) {
+      for (var i = 0; i < 6; i++) {
+        final x = size.width * (.06 + i * .16 + (row == .16 ? .07 : 0));
+        final y = size.height * row;
+        canvas.drawPath(Path()
+          ..moveTo(x, y)
+          ..quadraticBezierTo(x + 8, y - 5, x + 16, y)
+          ..quadraticBezierTo(x + 24, y + 5, x + 32, y), wave);
+      }
+    }
+    // Small caravel.
+    final ship = Offset(size.width * .30, size.height * .17);
+    final hull = Paint()..color = const Color(0xff3b2a20);
+    final sail = Paint()..color = const Color(0xffe9dcc1).withValues(alpha: .85);
+    canvas.drawPath(Path()
+      ..moveTo(ship.dx - 26, ship.dy)
+      ..lineTo(ship.dx + 26, ship.dy)
+      ..lineTo(ship.dx + 18, ship.dy + 10)
+      ..lineTo(ship.dx - 18, ship.dy + 10)
+      ..close(), hull);
+    canvas.drawRect(Rect.fromLTWH(ship.dx - 1, ship.dy - 34, 2, 34), hull);
+    canvas.drawPath(Path()
+      ..moveTo(ship.dx + 2, ship.dy - 32)..lineTo(ship.dx + 22, ship.dy - 6)..lineTo(ship.dx + 2, ship.dy - 6)..close(), sail);
+    canvas.drawPath(Path()
+      ..moveTo(ship.dx - 2, ship.dy - 26)..lineTo(ship.dx - 18, ship.dy - 6)..lineTo(ship.dx - 2, ship.dy - 6)..close(), sail);
+    canvas.drawRect(Rect.fromLTWH(ship.dx - 1, ship.dy - 40, 9, 5), Paint()..color = color);
+  }
+
+  void _paintCity(Canvas canvas, Size size) {
+    final star = Paint()..color = const Color(0xffeae4ff).withValues(alpha: .55);
+    final rnd = Random(7);
+    for (var i = 0; i < 40; i++) {
+      canvas.drawCircle(Offset(size.width * rnd.nextDouble(), size.height * rnd.nextDouble() * .22),
+        rnd.nextDouble() * 1.3 + .4, star);
+    }
+    final building = Paint()..color = const Color(0xff141626).withValues(alpha: .9);
+    final window = Paint()..color = const Color(0xffffe1a3).withValues(alpha: .45);
+    final base = size.height * .33;
+    var x = size.width * .04;
+    while (x < size.width * .70) {
+      final bw = size.width * (.035 + rnd.nextDouble() * .03);
+      final bh = size.height * (.06 + rnd.nextDouble() * .14);
+      canvas.drawRect(Rect.fromLTWH(x, base - bh, bw, bh), building);
+      for (var wy = base - bh + 6; wy < base - 6; wy += 9) {
+        for (var wx = x + 4; wx < x + bw - 4; wx += 7) {
+          if (rnd.nextDouble() < .45) canvas.drawRect(Rect.fromLTWH(wx, wy, 3, 4), window);
+        }
+      }
+      x += bw + 3;
+    }
+    // TV tower.
+    final tx = size.width * .58;
+    canvas.drawRect(Rect.fromLTWH(tx - 2, base - size.height * .27, 4, size.height * .27), building);
+    canvas.drawCircle(Offset(tx, base - size.height * .2), 6, building);
+    canvas.drawCircle(Offset(tx, base - size.height * .27), 2.5, Paint()..color = const Color(0xffff8a7a));
+    // Rocket on the launch pad.
+    final r = Offset(size.width * .90, size.height * .86);
+    final body = Paint()..color = const Color(0xffdcd8ea);
+    canvas.drawRRect(RRect.fromRectAndRadius(Rect.fromCenter(center: r, width: 12, height: 40), const Radius.circular(6)), body);
+    canvas.drawPath(Path()..moveTo(r.dx - 6, r.dy - 14)..lineTo(r.dx, r.dy - 30)..lineTo(r.dx + 6, r.dy - 14)..close(),
+      Paint()..color = color);
+    canvas.drawPath(Path()..moveTo(r.dx - 6, r.dy + 8)..lineTo(r.dx - 13, r.dy + 20)..lineTo(r.dx - 6, r.dy + 18)..close(), Paint()..color = color);
+    canvas.drawPath(Path()..moveTo(r.dx + 6, r.dy + 8)..lineTo(r.dx + 13, r.dy + 20)..lineTo(r.dx + 6, r.dy + 18)..close(), Paint()..color = color);
+    canvas.drawCircle(r.translate(0, -4), 3, Paint()..color = const Color(0xff4d5f8c));
+  }
+
   @override
-  bool shouldRepaint(covariant _WorldPainter oldDelegate) => oldDelegate.color != color;
+  bool shouldRepaint(covariant _WorldPainter oldDelegate) => oldDelegate.color != color || oldDelegate.scene != scene;
 }
 
 class _WorldMirror extends StatelessWidget {
@@ -556,11 +827,12 @@ class _MapBadge extends StatelessWidget {
 }
 
 class _MirrorCard extends StatelessWidget {
-  const _MirrorCard({required this.mood, required this.title, required this.subtitle, required this.compact});
+  const _MirrorCard({required this.mood, required this.title, required this.subtitle, required this.compact, this.cracks = 0});
   final String mood;
   final String title;
   final String subtitle;
   final bool compact;
+  final int cracks;
   @override
   Widget build(BuildContext context) {
     return Container(
@@ -578,7 +850,17 @@ class _MirrorCard extends StatelessWidget {
           decoration: BoxDecoration(shape: BoxShape.circle,
             color: const Color(0xffd9b58a).withValues(alpha: .12),
             border: Border.all(color: const Color(0xffd9b58a).withValues(alpha: .55), width: 2)),
-          child: _AnimatedFace(mood: mood, size: compact ? 70 : 86),
+          child: Stack(fit: StackFit.expand, children: [
+            _AnimatedFace(mood: mood, size: compact ? 70 : 86),
+            if (cracks > 0) IgnorePointer(child: ClipOval(child: TweenAnimationBuilder<double>(
+              key: ValueKey(cracks),
+              tween: Tween(begin: 0, end: 1),
+              duration: const Duration(milliseconds: 420),
+              curve: Curves.easeOutCubic,
+              builder: (context, progress, _) => CustomPaint(
+                painter: _CrackPainter(cracks: cracks, lastProgress: progress)),
+            ))),
+          ]),
         ),
         const SizedBox(width: 19),
         Flexible(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -656,30 +938,28 @@ class _AnimatedFace extends StatefulWidget {
 class _AnimatedFaceState extends State<_AnimatedFace> with TickerProviderStateMixin {
   late final AnimationController _float = AnimationController(vsync: this, duration: const Duration(milliseconds: 2200))..repeat(reverse: true);
   late final AnimationController _talk = AnimationController(vsync: this, duration: const Duration(milliseconds: 170))..repeat(reverse: true);
-  late final AnimationController _blink = AnimationController(vsync: this, duration: const Duration(milliseconds: 130));
+  /// One full blink: close (0–.3), hold (.3–.7), open (.7–1).
+  late final AnimationController _blink = AnimationController(vsync: this, duration: const Duration(milliseconds: 440));
+  Timer? _blinkTimer;
+
+  double get _blinkAmount {
+    final t = _blink.value;
+    if (t < .3) return t / .3;
+    if (t < .7) return 1;
+    return (1 - t) / .3;
+  }
 
   @override
   void initState() {
     super.initState();
-    _blink.addStatusListener((status) {
-      if (status == AnimationStatus.completed) {
-        Future<void>.delayed(const Duration(milliseconds: 180), () {
-          if (mounted) _blink.reverse();
-        });
-      }
-    });
-    _scheduleBlink();
-  }
-
-  Future<void> _scheduleBlink() async {
-    while (mounted) {
-      await Future<void>.delayed(const Duration(milliseconds: 2600));
+    _blinkTimer = Timer.periodic(const Duration(milliseconds: 2600), (_) {
       if (mounted && widget.mood != 'angry') _blink.forward(from: 0);
-    }
+    });
   }
 
   @override
   void dispose() {
+    _blinkTimer?.cancel();
     _float.dispose();
     _talk.dispose();
     _blink.dispose();
@@ -705,9 +985,9 @@ class _AnimatedFaceState extends State<_AnimatedFace> with TickerProviderStateMi
                 boxShadow: [BoxShadow(color: const Color(0xffd3ad79).withValues(alpha: .16 + (speaking ? .12 * _talk.value : 0)), blurRadius: 18, spreadRadius: 2)])),
             Column(mainAxisSize: MainAxisSize.min, children: [
               Row(mainAxisSize: MainAxisSize.min, children: [
-                _Eye(size: d * .12, angry: angry, blink: _blink.value),
+                _Eye(size: d * .12, angry: angry, blink: _blinkAmount),
                 SizedBox(width: d * .13),
-                _Eye(size: d * .12, angry: angry, blink: _blink.value),
+                _Eye(size: d * .12, angry: angry, blink: _blinkAmount),
               ]),
               SizedBox(height: d * .11),
               AnimatedContainer(duration: const Duration(milliseconds: 120),
@@ -757,8 +1037,9 @@ class _Eye extends StatelessWidget {
 }
 
 class _EraButton extends StatelessWidget {
-  const _EraButton({required this.era, required this.onTap});
+  const _EraButton({required this.era, required this.stars, required this.onTap});
   final Era era;
+  final int stars;
   final VoidCallback onTap;
   @override
   Widget build(BuildContext context) => InkWell(
@@ -771,6 +1052,7 @@ class _EraButton extends StatelessWidget {
         Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Text(era.name, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
           const SizedBox(height: 3), Text(era.years, style: const TextStyle(color: Color(0xffa4adae), fontSize: 11)),
+          const SizedBox(height: 5), _StarsRow(stars: stars, size: 15),
         ])),
         const Icon(Icons.chevron_right, color: Color(0xffa4adae), size: 18),
       ]),
@@ -841,3 +1123,83 @@ class _ProgressBar extends StatelessWidget {
     child: LinearProgressIndicator(value: value, minHeight: 5, backgroundColor: const Color(0xff344147), color: color));
 }
 
+/// Row of [maxCracks] stars, the first [stars] of which are filled.
+class _StarsRow extends StatelessWidget {
+  const _StarsRow({required this.stars, required this.size});
+  final int stars;
+  final double size;
+  @override
+  Widget build(BuildContext context) => Semantics(
+    label: 'Звёзд: $stars из $maxCracks',
+    child: Row(mainAxisSize: MainAxisSize.min, children: List.generate(maxCracks, (i) {
+      final filled = i < stars;
+      return Icon(filled ? Icons.star_rounded : Icons.star_outline_rounded, size: size,
+        color: filled ? const Color(0xffe2b47b) : const Color(0xff5d6a6d));
+    })),
+  );
+}
+
+/// Small mirrors in the top bar: one per allowed mistake, cracked ones turn red.
+class _CracksIndicator extends StatelessWidget {
+  const _CracksIndicator({required this.cracks});
+  final int cracks;
+  @override
+  Widget build(BuildContext context) => Tooltip(
+    message: 'Трещины на зеркале: $cracks из $maxCracks',
+    child: Row(mainAxisSize: MainAxisSize.min, children: List.generate(maxCracks, (i) {
+      final cracked = i < cracks;
+      return AnimatedContainer(
+        duration: const Duration(milliseconds: 300),
+        margin: const EdgeInsets.symmetric(horizontal: 2.5),
+        width: 15, height: 20,
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(10),
+          color: cracked ? const Color(0xffa75c55).withValues(alpha: .35) : const Color(0xffd9b58a).withValues(alpha: .16),
+          border: Border.all(color: cracked ? const Color(0xffe7a097) : const Color(0xffd9b58a), width: 1.5),
+        ),
+        child: cracked ? const ClipRRect(borderRadius: BorderRadius.all(Radius.circular(10)),
+          child: CustomPaint(painter: _CrackPainter(cracks: 1))) : null,
+      );
+    })),
+  );
+}
+
+/// Draws up to three jagged cracks across a mirror surface.
+class _CrackPainter extends CustomPainter {
+  const _CrackPainter({required this.cracks, this.lastProgress = 1});
+  final int cracks;
+  /// Draw progress (0..1) of the most recent crack, used for the "cracking" animation.
+  final double lastProgress;
+
+  static const _patterns = [
+    [Offset(.50, 0), Offset(.43, .22), Offset(.57, .38), Offset(.46, .58)],
+    [Offset(1, .32), Offset(.80, .42), Offset(.71, .60), Offset(.52, .64)],
+    [Offset(0, .72), Offset(.22, .62), Offset(.32, .80), Offset(.50, .70)],
+  ];
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = const Color(0xfff3ece0).withValues(alpha: .85)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = max(1.0, size.width * .022)
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round;
+    final count = min(cracks, _patterns.length);
+    for (var i = 0; i < count; i++) {
+      final points = _patterns[i].map((p) => Offset(p.dx * size.width, p.dy * size.height)).toList();
+      final path = Path()..moveTo(points.first.dx, points.first.dy);
+      for (final p in points.skip(1)) {
+        path.lineTo(p.dx, p.dy);
+      }
+      final progress = i == count - 1 ? lastProgress : 1.0;
+      for (final metric in path.computeMetrics()) {
+        canvas.drawPath(metric.extractPath(0, metric.length * progress), paint);
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _CrackPainter oldDelegate) =>
+    oldDelegate.cracks != cracks || oldDelegate.lastProgress != lastProgress;
+}
