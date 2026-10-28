@@ -19,9 +19,12 @@ flutter build web
 
 ## Публикация на GitHub Pages
 
-В репозитории настроен GitHub Actions workflow: после отправки изменений в ветку `main` он собирает Flutter Web и публикует сайт на GitHub Pages.
+Репозиторий: https://github.com/Mtruyker/Game
 
-1. Создайте GitHub-репозиторий с именем `mirror-of-time-game`.
-2. В настройках репозитория откройте **Settings → Pages** и выберите **GitHub Actions** как источник публикации.
-3. Отправьте проект в ветку `main`.
-4. Дождитесь успешного workflow **Deploy Flutter web to GitHub Pages**. Сайт будет доступен по адресу `https://mtruyker.github.io/mirror-of-time-game/`.
+В репозитории настроен GitHub Actions workflow. Один раз включите Pages:
+
+1. Откройте **Settings → Pages**.
+2. В разделе **Build and deployment** выберите **GitHub Actions** как источник.
+3. Отправьте изменения в ветку `main` или запустите workflow **Deploy Flutter web to GitHub Pages** вручную.
+
+После успешного workflow сайт будет доступен по адресу `https://mtruyker.github.io/Game/`.
